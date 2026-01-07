@@ -4,15 +4,19 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
+from pypdf.constants import UserAccessPermissions
 import subprocess
 from PIL import ImageTk
 import pypdfium2 as pdfium
 import threading
 from typing import Optional
-from page_views import PageSelectView, PageThumbnailView 
+from page_views import PageSelectView, PageThumbnailView
 from utils import find_gs, split_dnd_paths, open_folder
 import os
-from pypdf.constants import UserAccessPermissions 
+
+import pdfplumber
+from docx import Document
+from openpyxl import Workbook
 
 
 # ドラッグ&ドロップ対応（tkinterdnd2 があれば使う）
@@ -23,6 +27,7 @@ try:
 except Exception:
     BaseTk = tk.Tk
     DND_AVAILABLE = False
+
 
 class PDFToolApp(BaseTk):
     INVALID_FILENAME_CHARS = '\\/:*?\"<>|'
@@ -122,9 +127,9 @@ class PDFToolApp(BaseTk):
             suggestion = self.get_merge_default_name()
             self.set_placeholder(self.merge_output_entry, suggestion)
 
-    def get_split_default_name(self, mode: str, src_path: Path) -> str:
+    def get_split_default_name(self, mode: str, src: Path) -> str:
         suffix = "_抽出済" if mode == "keep" else "_削除済"
-        return f"{src_path.stem}{suffix}.pdf"
+        return f"{src.stem}{suffix}.pdf"
 
     def update_split_output_placeholder(self):
         if not getattr(self, "split_src_path", None):
@@ -168,7 +173,7 @@ class PDFToolApp(BaseTk):
 
         self.set_placeholder(self.compress_suffix_entry, placeholder)
 
-     # === パスワードタブ用 デフォルト名 ===
+    # === パスワードタブ用 デフォルト名 ===
     def get_lock_default_name(self, mode: str, src: Path) -> str:
         """モード別の標準ファイル名を返す"""
         if mode == "set":
@@ -211,7 +216,6 @@ class PDFToolApp(BaseTk):
             placeholder = self.get_text_default_suffix()
 
         self.set_placeholder(self.text_output_entry, placeholder)
-
 
     # ===== ファイル名・上書き確認（共通） =====
     def confirm_overwrite(self, path: Path) -> bool:
@@ -291,14 +295,16 @@ class PDFToolApp(BaseTk):
         self.tab_reorder = ttk.Frame(self.nb)
         self.tab_compress = ttk.Frame(self.nb)
         self.tab_password = ttk.Frame(self.nb)
-        self.tab_text = ttk.Frame(self.nb) 
+        self.tab_text = ttk.Frame(self.nb)
+        self.tab_convert = ttk.Frame(self.nb)  # 新タブ：PDF→Word/Excel
 
         self.nb.add(self.tab_merge, text="結合")
         self.nb.add(self.tab_split, text="抽出／削除")
         self.nb.add(self.tab_reorder, text="並び替え／回転")
         self.nb.add(self.tab_compress, text="圧縮")
         self.nb.add(self.tab_password, text="パスワード設定／解除")
-        self.nb.add(self.tab_text, text="テキスト抽出")  
+        self.nb.add(self.tab_text, text="テキスト抽出")
+        self.nb.add(self.tab_convert, text="PDF→Word/Excel")
 
         # タブ内容
         self.merge_tab()
@@ -307,6 +313,7 @@ class PDFToolApp(BaseTk):
         self.compress_tab()
         self.password_tab()
         self.text_tab()
+        self.convert_tab()
 
         # ------ 共通 出力フォルダ行 ------
         out_row = ttk.Frame(self)
@@ -683,8 +690,6 @@ class PDFToolApp(BaseTk):
         path = self.pdf_paths[idx]
         self.update_pdf_info(path)
 
-        # 固定の表示高さ
-        
         target_h = 380
 
         try:
@@ -730,7 +735,7 @@ class PDFToolApp(BaseTk):
                     f"パスワードが設定されているPDFは結合できません。\n"
                     f"対象ファイル: {path.name}"
                 )
-            
+
             for page in reader.pages:
                 writer.add_page(page)
 
@@ -780,7 +785,7 @@ class PDFToolApp(BaseTk):
         self.status.set("結合処理を開始しました")
         self.set_actions_state(False)
         try:
-            self.merge_pdfs(self.pdf_paths, out_path, progress_cb=self.progress_set)        
+            self.merge_pdfs(self.pdf_paths, out_path, progress_cb=self.progress_set)
         except ValueError as e:
             messagebox.showwarning("警告", str(e))
             self.status.set("結合を中止しました（パスワード付きPDFが含まれています）")
@@ -1020,7 +1025,7 @@ class PDFToolApp(BaseTk):
         out_path = out_dir / raw_name
 
         if not self.confirm_overwrite(out_path):
-            self.status.set(f"ページ{ '抽出' if mode == 'keep' else '削除' }をキャンセルしました（既存ファイルあり）")
+            self.status.set(f"ページ{'抽出' if mode == 'keep' else '削除'}をキャンセルしました（既存ファイルあり）")
             return
 
         self.set_actions_state(False)
@@ -1290,9 +1295,8 @@ class PDFToolApp(BaseTk):
     def set_pdf_password(src: Path, out_path: Path, owner_password: str, allow_print: bool) -> None:
         """
         閲覧は自由（パスワード不要）だが、
-        編集・注釈・フォーム入力などを禁止する PDF を出力する。
+        編集・注釈・フォーム入力などを制限した PDF を出力する。
         """
-
         reader = PdfReader(str(src))
         writer = PdfWriter()
 
@@ -1303,13 +1307,13 @@ class PDFToolApp(BaseTk):
         # まず「すべて許可」の状態からスタート
         perms = UserAccessPermissions(-1)
 
-        # ---- 編集系の権限を片っ端から OFF ----
+        # 編集系の権限を OFF
         deny_flags = [
-            "MODIFY",               # 内容の編集
-            "ASSEMBLE_DOC",         # ページ差し替え・入れ替え
-            "ADD_OR_MODIFY",        # 注釈やフォームの追加・変更（bit 5,6）:contentReference[oaicite:0]{index=0}
-            "FILL_FORM_FIELDS",     # フォーム入力（bit 9）:contentReference[oaicite:1]{index=1}
-            "EXTRACT_TEXT_AND_GRAPHICS",  # テキスト抽出
+            "MODIFY",                       # 内容の編集
+            "ASSEMBLE_DOC",                 # ページ差し替え・入れ替え
+            "ADD_OR_MODIFY",                # 注釈やフォームの追加・変更
+            "FILL_FORM_FIELDS",             # フォーム入力
+            "EXTRACT_TEXT_AND_GRAPHICS",    # テキスト抽出
         ]
 
         for name in deny_flags:
@@ -1317,23 +1321,22 @@ class PDFToolApp(BaseTk):
             if flag is not None:
                 perms &= ~flag
 
-        # ---- 印刷だけオプション扱い ----
+        # 印刷だけオプション扱い
         if not allow_print:
             flag_print = getattr(UserAccessPermissions, "PRINT", None)
             if flag_print is not None:
                 perms &= ~flag_print
 
-        # ---- 暗号化設定 ----
+        # 暗号化設定
         writer.encrypt(
-            user_password="",              # ← 誰でも閲覧ＯＫ
-            owner_password=owner_password, # ← 制限解除用パスワード
-            permissions_flag=perms,        # ← 権限フラグを反映
+            user_password="",              # 誰でも閲覧OK
+            owner_password=owner_password, # 制限解除用パスワード
+            permissions_flag=perms,        # 権限フラグを反映
         )
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "wb") as f:
             writer.write(f)
-
 
     @staticmethod
     def remove_pdf_password(src: Path, out_path: Path, password: str) -> None:
@@ -1343,19 +1346,19 @@ class PDFToolApp(BaseTk):
         password : 現在設定されているパスワード
         """
         reader = PdfReader(str(src))
-        # まず「そもそも暗号化されているか？」をチェック
+        # まず暗号化されているかチェック
         if not reader.is_encrypted:
-            # ここでエラーにして、呼び出し元に知らせる
             raise ValueError("このPDFにはパスワードが設定されていません。")
-        # 暗号化されているのでパスワードで復号を試みる
+
+        # パスワードで復号を試みる
         result = reader.decrypt(password)
         if result == 0:
-            # 復号に失敗 → パスワード違い
             raise ValueError("パスワードが違います。")
-        # 復号できたので、中身を新しいPDFに書き出す
+
         writer = PdfWriter()
         for page in reader.pages:
             writer.add_page(page)
+
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("wb") as f:
             writer.write(f)
@@ -1378,7 +1381,7 @@ class PDFToolApp(BaseTk):
                 text = None
 
             if text:
-                # 行単位で分割して上下を反転
+                # 行単位で分割して上下を反転（必要なければここは普通に出力に変えてもOK）
                 lines = text.splitlines()
                 lines.reverse()
                 fixed = "\n".join(lines)
@@ -1387,8 +1390,6 @@ class PDFToolApp(BaseTk):
                 chunks.append(f"--- Page {i} (テキストなし) ---\n")
 
         return "\n".join(chunks)
-
-
 
     # ---------------- 圧縮タブ ----------------
     @staticmethod
@@ -1406,7 +1407,7 @@ class PDFToolApp(BaseTk):
         ]
 
         if os.name == "nt":
-        # Windows でコンソール非表示
+            # Windows でコンソール非表示
             CREATE_NO_WINDOW = 0x08000000
             subprocess.run(cmd, check=True, creationflags=CREATE_NO_WINDOW)
         else:
@@ -1519,7 +1520,7 @@ class PDFToolApp(BaseTk):
                 "   それより小さくなったり、十分に小さくできない場合もあります。\n"
                 "   （場合によってはサイズが大きくなる場合もあります。）"
             ),
-            foreground="#444444",   
+            foreground="#444444",
             wraplength=600
         ).pack(anchor="w", padx=10, pady=(0, 10))
 
@@ -1528,7 +1529,277 @@ class PDFToolApp(BaseTk):
         btn_run_compress.pack(pady=10)
         self.action_buttons.append(btn_run_compress)
 
-        # ---------------- パスワードタブ ----------------
+    def on_compress_scale_release(self, event=None):
+        """スライダーを最も近い 1〜5 の整数にスナップさせる"""
+        try:
+            val = float(self.compress_level.get())
+        except Exception:
+            val = 3.0
+
+        val = round(val)
+        if val < 1:
+            val = 1
+        elif val > 5:
+            val = 5
+
+        self.compress_level.set(val)
+
+    # D&D: 圧縮タブ
+    def on_drop_compress(self, event):
+        pdf_paths = self._iter_dnd_pdf_paths(event)
+        if not pdf_paths:
+            return
+
+        added = 0
+        for path in pdf_paths:
+            if path not in self.compress_files:
+                self.compress_files.append(path)
+                added += 1
+
+        if not self.compress_files:
+            self.compress_label.set("（未選択）")
+        elif len(self.compress_files) == 1:
+            self.compress_label.set(self.compress_files[0].name)
+        else:
+            self.compress_label.set(
+                f"{self.compress_files[0].name} ほか {len(self.compress_files) - 1}件"
+            )
+
+        self.status.set(f"D&Dで圧縮対象: {len(self.compress_files)} 件のPDFを選択しました。")
+
+        # 先頭ファイルに合わせてプレースホルダ更新
+        self.update_compress_suffix_placeholder()
+
+        if self.compress_files:
+            self.update_pdf_info(self.compress_files[0])
+
+    def choose_compress_pdfs(self):
+        paths = filedialog.askopenfilenames(
+            title="圧縮するPDFを選択",
+            filetypes=[("PDFファイル", "*.pdf")],
+        )
+        if not paths:
+            return
+
+        self.compress_files = [Path(p) for p in paths]
+
+        if len(self.compress_files) == 1:
+            label = self.compress_files[0].name
+        else:
+            label = f"{self.compress_files[0].name} ほか {len(self.compress_files) - 1}件"
+
+        self.compress_label.set(label)
+        self.status.set(f"圧縮対象: {len(self.compress_files)} 件のPDFを選択しました。")
+
+        # ここでプレースホルダを更新
+        self.update_compress_suffix_placeholder()
+
+        if self.compress_files:
+            self.update_pdf_info(self.compress_files[0])
+
+    def run_compress(self):
+        # 圧縮対象があるか
+        if not getattr(self, "compress_files", None):
+            self.compress_files = []
+
+        if not self.compress_files:
+            messagebox.showwarning("警告", "圧縮するPDFを選んでください。")
+            return
+
+        # Ghostscript のパス
+        if not hasattr(self, "gs_path") or self.gs_path is None:
+            self.gs_path = find_gs()
+
+        if not self.gs_path:
+            messagebox.showerror("エラー", "Ghostscript が見つかりません。圧縮を実行できません。")
+            return
+
+        # 目標サイズ（MB）の読み取り
+        target_mb: Optional[float] = None
+
+        raw = self.target_size_mb.get()
+        raw_stripped = raw.strip()
+
+        if raw_stripped:
+            try:
+                v = float(raw_stripped)
+                if v > 0:
+                    target_mb = v
+            except ValueError:
+                messagebox.showwarning("警告", "目標サイズ(MB) は数値で入力してください。")
+                return
+
+        # Ghostscript のプリセット
+        presets = ["/prepress", "/printer", "/default", "/ebook", "/screen"]
+
+        def level_to_start_index(lv: int) -> int:
+            if lv <= 1:
+                return 0      # /prepress
+            elif lv == 2:
+                return 1      # /printer
+            elif lv == 3:
+                return 2      # /default
+            elif lv == 4:
+                return 3      # /ebook
+            else:
+                return 4      # /screen
+
+        # 優先順位ロジック
+        if target_mb is None:
+            level = int(self.compress_level.get())
+            start_idx = level_to_start_index(level)
+        else:
+            # 目標サイズあり → スライダー無視で /prepress から順番に試す
+            start_idx = 0
+
+        # 出力ファイル一覧
+        tasks: list[tuple[Path, Path]] = []
+        report_lines: list[str] = []
+
+        for src in self.compress_files:
+            src = Path(src)
+
+            pattern = self.get_entry_text(self.compress_suffix_entry).strip()
+
+            if not pattern:
+                out_name = self.get_compress_default_name(src)
+            else:
+                if "{name}" in pattern:
+                    out_name = pattern.replace("{name}", src.stem)
+                else:
+                    out_name = pattern
+
+                if not out_name.lower().endswith(".pdf"):
+                    out_name += ".pdf"
+
+            dir_str = self.output_dir_var.get().strip()
+            if dir_str:
+                out_path = Path(dir_str) / out_name
+            else:
+                out_path = src.with_name(out_name)
+
+            if not self.confirm_overwrite(out_path):
+                report_lines.append(f"{src.name}: スキップ（既存ファイル有りのため）")
+            else:
+                tasks.append((src, out_path))
+
+        if not tasks:
+            self.status.set("圧縮をキャンセルしました（すべてスキップ）")
+            return
+
+        # 実行
+        self.progress_reset()
+        total_files = len(tasks)
+        self.set_actions_state(False)
+        self.status.set("圧縮処理を開始しました...")
+
+        gs_path = self.gs_path
+
+        def worker():
+            processed = 0
+            last_out_path: Optional[Path] = None
+
+            try:
+                for idx, (src, out_path) in enumerate(tasks, start=1):
+                    try:
+                        orig_bytes = src.stat().st_size
+                    except FileNotFoundError:
+                        report_lines.append(f"{src.name}: ファイルが見つかりません（スキップ）")
+                        continue
+
+                    orig_mb = orig_bytes / (1024 * 1024)
+
+                    # ---------- 圧縮ロジック ----------
+                    if target_mb is None:
+                        # スライダーのみ適用
+                        setting = presets[start_idx]
+                        self.compress_one_pdf(src, out_path, gs_path, setting)
+                        new_bytes = out_path.stat().st_size
+                        new_mb = new_bytes / (1024 * 1024)
+
+                    else:
+                        # 目標サイズ優先モード
+                        cur_idx = start_idx
+                        last_idx = len(presets) - 1
+
+                        while True:
+                            setting = presets[cur_idx]
+                            self.compress_one_pdf(src, out_path, gs_path, setting)
+                            new_bytes = out_path.stat().st_size
+                            new_mb = new_bytes / (1024 * 1024)
+
+                            if new_mb <= target_mb:
+                                break
+
+                            if cur_idx < last_idx:
+                                cur_idx += 1
+                            else:
+                                break
+                    # ----------------------------------
+
+                    processed += 1
+                    last_out_path = out_path
+
+                    if orig_bytes > 0:
+                        reduce_ratio = (1 - new_bytes / orig_bytes) * 100
+                    else:
+                        reduce_ratio = 0.0
+
+                    report_lines.append(
+                        f"{src.name}: {orig_mb:.2f}MB → {new_mb:.2f}MB ({reduce_ratio:.1f}%削減)"
+                    )
+
+                    percent = idx / total_files * 100
+
+                    def _update_progress(p=percent, name=src.name, i=idx):
+                        self.progress_set(p)
+                        self.status.set(f"圧縮中...（{i}/{total_files}）{name}")
+
+                    self.after(0, _update_progress)
+
+            except subprocess.CalledProcessError as e:
+                def _on_error():
+                    messagebox.showerror("エラー", f"圧縮中にエラーが発生しました:\n{e}")
+                    self.status.set("圧縮に失敗しました")
+                    self.set_actions_state(True)
+                    self.progress_reset()
+
+                self.after(0, _on_error)
+                return
+
+            except Exception as e:
+                def _on_error():
+                    messagebox.showerror("エラー", f"圧縮中に予期しないエラーが発生しました:\n{e}")
+                    self.status.set("圧縮に失敗しました")
+                    self.set_actions_state(True)
+                    self.progress_reset()
+
+                self.after(0, _on_error)
+                return
+
+            def _on_success():
+                self.progress_done()
+
+                if report_lines:
+                    msg = "圧縮結果:\n\n" + "\n".join(report_lines)
+                else:
+                    msg = "圧縮が完了しました。"
+
+                if target_mb is not None:
+                    msg = f"[目標サイズ: {target_mb:.2f}MB]\n\n" + msg
+
+                messagebox.showinfo("完了", msg)
+                self.status.set(f"圧縮を完了しました:{processed}件")
+                self.set_actions_state(True)
+
+                if self.open_after.get() and last_out_path is not None:
+                    open_folder(last_out_path)
+
+            self.after(0, _on_success)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------------- パスワードタブ ----------------
     def password_tab(self):
         frame = self.tab_password
 
@@ -1575,7 +1846,6 @@ class PDFToolApp(BaseTk):
             text="パスワードを設定",
             value="set",
             variable=self.lock_mode,
-            #command=self.on_lock_mode_changed,
             command=self.update_lock_mode_ui,
         ).pack(side="left", padx=5, pady=5)
 
@@ -1584,7 +1854,6 @@ class PDFToolApp(BaseTk):
             text="パスワードを解除",
             value="clear",
             variable=self.lock_mode,
-            #command=self.on_lock_mode_changed,
             command=self.update_lock_mode_ui,
         ).pack(side="left", padx=5, pady=5)
 
@@ -1615,7 +1884,7 @@ class PDFToolApp(BaseTk):
 
         self.disable_print = tk.BooleanVar(value=False)
 
-        self.chk_disable_print =ttk.Checkbutton(
+        self.chk_disable_print = ttk.Checkbutton(
             print_frame,
             text="印刷を禁止する（閲覧のみ許可）",
             variable=self.disable_print,
@@ -1645,7 +1914,6 @@ class PDFToolApp(BaseTk):
         # 初期状態のプレースホルダを反映
         self.update_lock_output_placeholder()
 
-
         # --- 実行ボタン ---
         btn_run_lock = ttk.Button(frame, text="パスワード処理を実行", command=self.run_lock_action)
         btn_run_lock.pack(pady=10)
@@ -1653,10 +1921,8 @@ class PDFToolApp(BaseTk):
 
         self.update_lock_mode_ui()
 
-
     def update_lock_mode_ui(self):
         """パスワード設定/解除のUI状態切り替え"""
-
         mode = self.lock_mode.get()
 
         if mode == "set":
@@ -1665,10 +1931,12 @@ class PDFToolApp(BaseTk):
         else:
             # 解除時 → チェックボックスは無効化
             self.chk_disable_print.configure(state="disabled")
-        
+
         # モードに応じて _locked / _unlocked を出し分け
         self.update_lock_output_placeholder()
 
+        # パスワード入力欄の状態切り替えも行う
+        self.on_lock_mode_changed()
 
     # D&D: パスワードタブ
     def on_drop_lock(self, event):
@@ -1683,7 +1951,7 @@ class PDFToolApp(BaseTk):
         self.lock_file_label.set(path.name)
         self.status.set(f"パスワード対象（D&D）: {path}")
         self.update_pdf_info(path)
-
+        self.update_lock_output_placeholder()
 
     def choose_lock_pdf(self):
         """パスワード設定／解除の対象PDFを選択"""
@@ -1702,44 +1970,14 @@ class PDFToolApp(BaseTk):
 
         self.update_lock_output_placeholder()
 
-
     def on_lock_mode_changed(self):
-        """モード変更時のUI調整"""
+        """モード変更時のUI調整（パスワード入力欄）"""
         mode = self.lock_mode.get()
         if mode == "set":
             # 設定モード：確認用も使う
             self.lock_pwd_confirm_entry.config(state="normal")
         else:
-            # 解除モード：確認用は無効にしておく（見た目だけ）
-            self.lock_pwd_confirm_entry.config(state="disabled")
-
-        # 入力リセット
-        self.lock_pwd_var.set("")
-        self.lock_pwd_confirm_var.set("")
-    
-    def choose_lock_pdf(self):
-        """パスワード設定／解除の対象PDFを選択"""
-        path = filedialog.askopenfilename(
-            title="パスワード設定／解除をするPDFを選択",
-            filetypes=[("PDFファイル", "*.pdf")],
-        )
-        if not path:
-            return
-
-        p = Path(path)
-        self.lock_file = p
-        self.lock_file_label.set(p.name)
-        self.status.set(f"パスワード対象: {p}")
-        self.update_pdf_info(p)
-
-    def on_lock_mode_changed(self):
-        """モード変更時のUI調整"""
-        mode = self.lock_mode.get()
-        if mode == "set":
-            # 設定モード：確認用も使う
-            self.lock_pwd_confirm_entry.config(state="normal")
-        else:
-            # 解除モード：確認用は無効にしておく（見た目だけ）
+            # 解除モード：確認用は無効化（見た目だけ）
             self.lock_pwd_confirm_entry.config(state="disabled")
 
         # 入力リセット
@@ -2010,290 +2248,407 @@ class PDFToolApp(BaseTk):
         if self.open_after.get():
             open_folder(out_path)
 
+    # ---------------- PDF→Word/Excel 変換タブ ----------------
+    def convert_tab(self):
+        frame = self.tab_convert
 
-    def on_compress_scale_release(self, event=None):
-        """スライダーを最も近い 1〜5 の整数にスナップさせる"""
-        try:
-            val = float(self.compress_level.get())
-        except Exception:
-            val = 3.0
+        ttk.Label(
+            frame,
+            text=(
+                "選択したPDFを Word / Excel に変換します。\n"
+                "・複数PDFを一括で変換できます。\n"
+                "・PDF内に表があれば、可能な範囲で表として変換します。"
+            ),
+        ).pack(anchor="w", padx=10, pady=10)
 
-        val = round(val)
-        if val < 1:
-            val = 1
-        elif val > 5:
-            val = 5
+        # ====== 対象PDF選択 ======
+        targets_frame = ttk.Frame(frame)
+        targets_frame.pack(fill="x", padx=10, pady=(5, 5))
 
-        self.compress_level.set(val)
+        ttk.Label(targets_frame, text="変換するPDF（複数選択可）:").pack(side="left")
 
-    # D&D: 圧縮タブ
-    def on_drop_compress(self, event):
+        self.convert_files: list[Path] = []
+        self.convert_label = tk.StringVar(value="（未選択）")
+
+        ttk.Button(
+            targets_frame,
+            text="PDFを選択",
+            command=self.choose_convert_pdfs,
+        ).pack(side="left")
+
+        ttk.Label(
+            targets_frame,
+            textvariable=self.convert_label,
+        ).pack(side="left", padx=10)
+
+        # D&D対応（変換タブ用）
+        if DND_AVAILABLE:
+            frame.drop_target_register(DND_FILES)
+            frame.dnd_bind("<<Drop>>", self.on_drop_convert)
+
+        # ====== 変換先フォーマット選択 ======
+        fmt_frame = ttk.LabelFrame(frame, text="出力形式")
+        fmt_frame.pack(fill="x", padx=10, pady=(5, 5))
+
+        self.convert_to_word = tk.BooleanVar(value=True)
+        self.convert_to_excel = tk.BooleanVar(value=False)
+
+        ttk.Checkbutton(
+            fmt_frame,
+            text="Word（.docx）",
+            variable=self.convert_to_word,
+        ).pack(side="left", padx=5, pady=3)
+
+        ttk.Checkbutton(
+            fmt_frame,
+            text="Excel（.xlsx）",
+            variable=self.convert_to_excel,
+        ).pack(side="left", padx=5, pady=3)
+
+        ttk.Label(
+            fmt_frame,
+            text="※ 少なくともどちらか一方を選択してください。",
+        ).pack(side="left", padx=10)
+
+        # ====== 出力ファイル名パターン ======
+        name_frame = ttk.Frame(frame)
+        name_frame.pack(fill="x", padx=10, pady=(5, 5))
+
+        ttk.Label(name_frame, text="出力ファイル名パターン:").pack(side="left")
+
+        self.convert_name_pattern = tk.StringVar(value="")
+        self.convert_name_entry = ttk.Entry(
+            name_frame,
+            textvariable=self.convert_name_pattern,
+            width=50,
+        )
+        self.convert_name_entry.pack(side="left", padx=5)
+
+        # プレースホルダ
+        self.init_placeholder(
+            self.convert_name_entry,
+            "空欄:'元ファイル名'.docx / .xlsx   ※ {name} で元ファイル名を差し込み可",
+        )
+
+        ttk.Label(
+            frame,
+            text=(
+                "例）{name}_converted  とすると、  sample.pdf → sample_converted.docx / sample_converted.xlsx\n"
+                "　　空欄の場合は、 sample.pdf → sample.docx / sample.xlsx となります。"
+            ),
+            wraplength=800,
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
+        # ====== 実行ボタン ======
+        btn_run_convert = ttk.Button(
+            frame,
+            text="PDF→Word/Excel 変換を実行",
+            command=self.run_convert,
+        )
+        btn_run_convert.pack(pady=10)
+        self.action_buttons.append(btn_run_convert)
+
+    # D&D: 変換タブ
+    def on_drop_convert(self, event):
         pdf_paths = self._iter_dnd_pdf_paths(event)
         if not pdf_paths:
             return
 
         added = 0
         for path in pdf_paths:
-            if path not in self.compress_files:
-                self.compress_files.append(path)
+            if path not in self.convert_files:
+                self.convert_files.append(path)
                 added += 1
 
-        if not self.compress_files:
-            self.compress_label.set("（未選択）")
-        elif len(self.compress_files) == 1:
-            self.compress_label.set(self.compress_files[0].name)
+        if not self.convert_files:
+            self.convert_label.set("（未選択）")
+        elif len(self.convert_files) == 1:
+            self.convert_label.set(self.convert_files[0].name)
         else:
-            self.compress_label.set(
-                f"{self.compress_files[0].name} ほか {len(self.compress_files) - 1}件"
+            self.convert_label.set(
+                f"{self.convert_files[0].name} ほか {len(self.convert_files) - 1}件"
             )
 
-        self.status.set(f"D&Dで圧縮対象: {len(self.compress_files)} 件のPDFを選択しました。")
+        self.status.set(f"D&Dで変換対象: {len(self.convert_files)} 件のPDFを選択しました。")
 
-        # 先頭ファイルに合わせてプレースホルダ更新
-        self.update_compress_suffix_placeholder()
+        if self.convert_files:
+            self.update_pdf_info(self.convert_files[0])
 
-        if self.compress_files:
-            self.update_pdf_info(self.compress_files[0])
-
-    def choose_compress_pdfs(self):
+    def choose_convert_pdfs(self):
         paths = filedialog.askopenfilenames(
-            title="圧縮するPDFを選択",
+            title="Word/Excel に変換するPDFを選択",
             filetypes=[("PDFファイル", "*.pdf")],
         )
         if not paths:
             return
 
-        self.compress_files = [Path(p) for p in paths]
+        self.convert_files = [Path(p) for p in paths]
 
-        if len(self.compress_files) == 1:
-            label = self.compress_files[0].name
+        if len(self.convert_files) == 1:
+            label = self.convert_files[0].name
         else:
-            label = f"{self.compress_files[0].name} ほか {len(self.compress_files) - 1}件"
+            label = f"{self.convert_files[0].name} ほか {len(self.convert_files) - 1}件"
 
-        self.compress_label.set(label)
-        self.status.set(f"圧縮対象: {len(self.compress_files)} 件のPDFを選択しました。")
+        self.convert_label.set(label)
+        self.status.set(f"変換対象: {len(self.convert_files)} 件のPDFを選択しました。")
 
-        # ここでプレースホルダを更新
-        self.update_compress_suffix_placeholder()
+        if self.convert_files:
+            self.update_pdf_info(self.convert_files[0])
 
-        if self.compress_files:
-            self.update_pdf_info(self.compress_files[0])
+    def run_convert(self):
+        """PDF→Word/Excel 変換の実行本体"""
+        # 対象PDFチェック
+        if not getattr(self, "convert_files", None):
+            self.convert_files = []
 
-    def run_compress(self):
-        # 圧縮対象があるか
-        if not getattr(self, "compress_files", None):
-            self.compress_files = []
-
-        if not self.compress_files:
-            messagebox.showwarning("警告", "圧縮するPDFを選んでください。")
+        if not self.convert_files:
+            messagebox.showwarning("警告", "変換するPDFを選択してください。")
             return
 
-        # Ghostscript のパス
-        if not hasattr(self, "gs_path") or self.gs_path is None:
-            self.gs_path = find_gs()
+        # 出力形式チェック
+        to_word = self.convert_to_word.get()
+        to_excel = self.convert_to_excel.get()
 
-        if not self.gs_path:
-            messagebox.showerror("エラー", "Ghostscript が見つかりません。圧縮を実行できません。")
+        if not (to_word or to_excel):
+            messagebox.showwarning("警告", "WordかExcelの少なくとも一方を選択してください。")
             return
 
-        # =====================================================
-        # 目標サイズ（MB）の読み取り ＋ デバッグ出力
-        # =====================================================
-        target_mb: Optional[float] = None
+        # 出力ファイル名パターン
+        pattern = self.get_entry_text(self.convert_name_entry).strip()
 
-        raw = self.target_size_mb.get()
-        #print(f"DEBUG raw_from_entry = {repr(raw)}")
+        # 変換タスク一覧: (src, "word"/"excel", out_path)
+        tasks: list[tuple[Path, str, Path]] = []
 
-        raw_stripped = raw.strip()
-        #print(f"DEBUG raw_stripped   = {repr(raw_stripped)}")
-
-        if raw_stripped:
-            try:
-                v = float(raw_stripped)
-                #print(f"DEBUG parsed_value = {v}")
-                if v > 0:
-                    target_mb = v
-            except ValueError:
-                #print("DEBUG parse_error: cannot float() raw_stripped")
-                messagebox.showwarning("警告", "目標サイズ(MB) は数値で入力してください。")
-                return
-
-        #print(f"DEBUG target_mb      = {target_mb}")
-
-        # Ghostscript のプリセット
-        presets = ["/prepress", "/printer", "/default", "/ebook", "/screen"]
-
-        def level_to_start_index(lv: int) -> int:
-            if lv <= 1:
-                return 0      # /prepress
-            elif lv == 2:
-                return 1      # /printer
-            elif lv == 3:
-                return 2      # /default
-            elif lv == 4:
-                return 3      # /ebook
-            else:
-                return 4      # /screen
-
-        # ====== 優先順位ロジック ======
-        if target_mb is None:
-            level = int(self.compress_level.get())
-            start_idx = level_to_start_index(level)
-            #print(f"DEBUG mode = slider_only, level={level}, start_idx={start_idx}")
-        else:
-            # 目標サイズあり → スライダー無視で /prepress から順番に試す
-            start_idx = 0
-            #print(f"DEBUG mode = target_priority, start_idx={start_idx}")
-
-        # ====== 出力ファイル一覧 ======
-        tasks: list[tuple[Path, Path]] = []
-        report_lines: list[str] = []
-
-        for src in self.compress_files:
+        for src in self.convert_files:
             src = Path(src)
 
-            pattern = self.get_entry_text(self.compress_suffix_entry).strip()
-
+            # 共通の名前ベース
             if not pattern:
-                out_name = self.get_compress_default_name(src)
+                base = src.stem
             else:
                 if "{name}" in pattern:
-                    out_name = pattern.replace("{name}", src.stem)
+                    base = pattern.replace("{name}", src.stem)
                 else:
-                    out_name = pattern
+                    base = pattern
 
-                if not out_name.lower().endswith(".pdf"):
-                    out_name += ".pdf"
-
+            # 出力フォルダ（共通設定 or 元PDFフォルダ）
             dir_str = self.output_dir_var.get().strip()
             if dir_str:
-                out_path = Path(dir_str) / out_name
+                out_dir = Path(dir_str)
             else:
-                out_path = src.with_name(out_name)
+                out_dir = src.parent
 
-            if not self.confirm_overwrite(out_path):
-                report_lines.append(f"{src.name}: スキップ（既存ファイル有りのため）")
-            else:
-                tasks.append((src, out_path))
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                messagebox.showerror("エラー", f"出力フォルダの作成に失敗しました:\n{e}")
+                return
+
+            # Word
+            if to_word:
+                word_name = base
+                if not word_name.lower().endswith(".docx"):
+                    word_name += ".docx"
+                word_path = out_dir / word_name
+
+                if self.confirm_overwrite(word_path):
+                    tasks.append((src, "word", word_path))
+
+            # Excel
+            if to_excel:
+                excel_name = base
+                if not excel_name.lower().endswith(".xlsx"):
+                    excel_name += ".xlsx"
+                excel_path = out_dir / excel_name
+
+                if self.confirm_overwrite(excel_path):
+                    tasks.append((src, "excel", excel_path))
 
         if not tasks:
-            self.status.set("圧縮をキャンセルしました（すべてスキップ）")
+            self.status.set("変換をキャンセルしました（すべてスキップ）")
             return
 
-        # ====== 実行 ======
+        # 変換実行
         self.progress_reset()
-        total_files = len(tasks)
         self.set_actions_state(False)
-        self.status.set("圧縮処理を開始しました...")
+        self.status.set("PDF→Word/Excel 変換を開始しました...")
 
-        gs_path = self.gs_path
+        total = len(tasks)
 
         def worker():
             processed = 0
-            last_out_path: Optional[Path] = None
+            last_out: Optional[Path] = None
+            report_lines: list[str] = []
 
             try:
-                for idx, (src, out_path) in enumerate(tasks, start=1):
+                for idx, (src, fmt, out_path) in enumerate(tasks, start=1):
                     try:
-                        orig_bytes = src.stat().st_size
-                    except FileNotFoundError:
-                        report_lines.append(f"{src.name}: ファイルが見つかりません（スキップ）")
-                        continue
+                        if fmt == "word":
+                            self.convert_pdf_to_word(src, out_path)
+                            kind = "Word"
+                        else:
+                            self.convert_pdf_to_excel(src, out_path)
+                            kind = "Excel"
 
-                    orig_mb = orig_bytes / (1024 * 1024)
+                        processed += 1
+                        last_out = out_path
+                        report_lines.append(f"{src.name} → {out_path.name} ({kind})")
 
-                    # ---------- 圧縮ロジック ----------
-                    if target_mb is None:
-                        # スライダーのみ適用
-                        setting = presets[start_idx]
-                        #print(f"DEBUG compress slider_only: {src.name}, setting={setting}")
-                        self.compress_one_pdf(src, out_path, gs_path, setting)
-                        new_bytes = out_path.stat().st_size
-                        new_mb = new_bytes / (1024 * 1024)
+                        percent = idx / total * 100
 
-                    else:
-                        # 目標サイズ優先モード
-                        cur_idx = start_idx      # 0 固定
-                        last_idx = len(presets) - 1
+                        def _update(p=percent, sname=src.name, kind_str=kind, i=idx):
+                            self.progress_set(p)
+                            self.status.set(f"{kind_str} 変換中...（{i}/{total}）{sname}")
 
-                        while True:
-                            setting = presets[cur_idx]
-                            #print(f"DEBUG compress target: {src.name}, setting={setting}")
-                            self.compress_one_pdf(src, out_path, gs_path, setting)
-                            new_bytes = out_path.stat().st_size
-                            new_mb = new_bytes / (1024 * 1024)
-                            #print(f"DEBUG size after {setting}: {new_mb:.2f}MB (target {target_mb}MB)")
+                        self.after(0, _update)
 
-                            if new_mb <= target_mb:
-                                break
+                    except Exception as e:
+                        def _on_err_one(msg=str(e), sname=src.name, kind_str=fmt):
+                            messagebox.showerror(
+                                "エラー",
+                                f"{sname} の {kind_str} 変換中にエラーが発生しました:\n{msg}"
+                            )
+                        self.after(0, _on_err_one)
 
-                            if cur_idx < last_idx:
-                                cur_idx += 1
-                            else:
-                                break
-                    # ----------------------------------
-
-                    processed += 1
-                    last_out_path = out_path
-
-                    if orig_bytes > 0:
-                        reduce_ratio = (1 - new_bytes / orig_bytes) * 100
-                    else:
-                        reduce_ratio = 0.0
-
-                    report_lines.append(
-                        f"{src.name}: {orig_mb:.2f}MB → {new_mb:.2f}MB ({reduce_ratio:.1f}%削減)"
-                    )
-
-                    percent = idx / total_files * 100
-
-                    def _update_progress(p=percent, name=src.name, i=idx):
-                        self.progress_set(p)
-                        self.status.set(f"圧縮中...（{i}/{total_files}）{name}")
-
-                    self.after(0, _update_progress)
-
-            except subprocess.CalledProcessError as e:
-                def _on_error():
-                    messagebox.showerror("エラー", f"圧縮中にエラーが発生しました:\n{e}")
-                    self.status.set("圧縮に失敗しました")
+            finally:
+                def _on_finish():
                     self.set_actions_state(True)
-                    self.progress_reset()
+                    if processed > 0:
+                        self.progress_done()
+                        if report_lines:
+                            msg = "変換結果:\n\n" + "\n".join(report_lines)
+                        else:
+                            msg = "変換が完了しました。"
+                        messagebox.showinfo("完了", msg)
+                        self.status.set(f"PDF→Word/Excel 変換を完了しました: {processed}個")
 
-                self.after(0, _on_error)
-                return
+                        if self.open_after.get() and last_out is not None:
+                            open_folder(last_out)
+                    else:
+                        self.progress_reset()
+                        self.status.set("PDF→Word/Excel 変換は完了しました（すべて失敗またはスキップ）")
 
-            except Exception as e:
-                def _on_error():
-                    messagebox.showerror("エラー", f"圧縮中に予期しないエラーが発生しました:\n{e}")
-                    self.status.set("圧縮に失敗しました")
-                    self.set_actions_state(True)
-                    self.progress_reset()
-
-                self.after(0, _on_error)
-                return
-
-            def _on_success():
-                self.progress_done()
-
-                if report_lines:
-                    msg = "圧縮結果:\n\n" + "\n".join(report_lines)
-                else:
-                    msg = "圧縮が完了しました。"
-
-                if target_mb is not None:
-                    msg = f"[目標サイズ: {target_mb:.2f}MB]\n\n" + msg
-
-                messagebox.showinfo("完了", msg)
-                self.status.set(f"圧縮を完了しました:{processed}件")
-                self.set_actions_state(True)
-
-                if self.open_after.get() and last_out_path is not None:
-                    open_folder(last_out_path)
-
-            self.after(0, _on_success)
+                self.after(0, _on_finish)
 
         threading.Thread(target=worker, daemon=True).start()
 
+    @staticmethod
+    def convert_pdf_to_word(src: Path, out_path: Path) -> None:
+        """
+        PDF → Word(.docx)
+        ・pdfplumberで文字と表を抽出
+        ・表は docx の Table として追加
+        """
+        doc = Document()
+
+        with pdfplumber.open(str(src)) as pdf:
+            for page_index, page in enumerate(pdf.pages, start=1):
+                # テキスト
+                try:
+                    text = page.extract_text() or ""
+                except Exception:
+                    text = ""
+
+                if text.strip():
+                    doc.add_paragraph(f"--- Page {page_index} ---")
+                    for line in text.splitlines():
+                        if line.strip():
+                            doc.add_paragraph(line)
+                    doc.add_paragraph("")
+
+                # 表抽出
+                try:
+                    tables = page.extract_tables() or []
+                except Exception:
+                    tables = []
+
+                for t_idx, table_data in enumerate(tables, start=1):
+                    if not table_data:
+                        continue
+
+                    doc.add_paragraph(f"[Page {page_index} Table {t_idx}]")
+
+                    # 行ごとに None を空文字に変換
+                    rows = [
+                        ["" if cell is None else str(cell) for cell in row]
+                        for row in table_data
+                    ]
+                    max_cols = max((len(r) for r in rows), default=0)
+                    if max_cols == 0:
+                        continue
+
+                    table = doc.add_table(rows=len(rows), cols=max_cols)
+                    for r_idx, row in enumerate(rows):
+                        for c_idx, cell in enumerate(row):
+                            table.rows[r_idx].cells[c_idx].text = cell
+
+                    doc.add_paragraph("")
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(out_path))
+
+    @staticmethod
+    def convert_pdf_to_excel(src: Path, out_path: Path) -> None:
+        """
+        PDF → Excel(.xlsx)
+        ・pdfplumberで表を抽出し、1シートに順番に貼り付ける
+        ・表がまったく無い場合は、テキストをA列に書き出す
+        """
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "from PDF"
+
+        current_row = 1
+        any_table = False
+
+        with pdfplumber.open(str(src)) as pdf:
+            for page_index, page in enumerate(pdf.pages, start=1):
+                try:
+                    tables = page.extract_tables() or []
+                except Exception:
+                    tables = []
+
+                if tables:
+                    any_table = True
+
+                for t_idx, table_data in enumerate(tables, start=1):
+                    if not table_data:
+                        continue
+
+                    # ページ＆テーブル番号を見出しとして1行入れる
+                    ws.cell(row=current_row, column=1, value=f"Page {page_index} Table {t_idx}")
+                    current_row += 1
+
+                    for row in table_data:
+                        col_idx = 1
+                        for cell in row:
+                            ws.cell(row=current_row, column=col_idx, value=cell)
+                            col_idx += 1
+                        current_row += 1
+
+                    current_row += 1  # 表と表の間に1行空ける
+
+            # 表が1つも取れなかった場合 → テキストをA列に書く
+            if not any_table:
+                current_row = 1
+                for page_index, page in enumerate(pdf.pages, start=1):
+                    try:
+                        text = page.extract_text() or ""
+                    except Exception:
+                        text = ""
+
+                    if text.strip():
+                        ws.cell(row=current_row, column=1, value=f"--- Page {page_index} ---")
+                        current_row += 1
+                        for line in text.splitlines():
+                            ws.cell(row=current_row, column=1, value=line)
+                            current_row += 1
+                        current_row += 1
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(str(out_path))
 
 
+if __name__ == "__main__":
+    app = PDFToolApp()
+    app.mainloop()
