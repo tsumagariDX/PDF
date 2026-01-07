@@ -292,6 +292,7 @@ class PDFToolApp(BaseTk):
         self.tab_compress = ttk.Frame(self.nb)
         self.tab_password = ttk.Frame(self.nb)
         self.tab_text = ttk.Frame(self.nb) 
+        self.tab_convert = ttk.Frame(self.nb)
 
         self.nb.add(self.tab_merge, text="結合")
         self.nb.add(self.tab_split, text="抽出／削除")
@@ -299,6 +300,7 @@ class PDFToolApp(BaseTk):
         self.nb.add(self.tab_compress, text="圧縮")
         self.nb.add(self.tab_password, text="パスワード設定／解除")
         self.nb.add(self.tab_text, text="テキスト抽出")  
+        self.nb.add(self.tab_convert, text="Word/Excel変換")
 
         # タブ内容
         self.merge_tab()
@@ -307,6 +309,7 @@ class PDFToolApp(BaseTk):
         self.compress_tab()
         self.password_tab()
         self.text_tab()
+        self.convert_tab()
 
         # ------ 共通 出力フォルダ行 ------
         out_row = ttk.Frame(self)
@@ -2009,6 +2012,244 @@ class PDFToolApp(BaseTk):
         self.status.set(f"テキスト抽出を完了しました: {out_path}")
         if self.open_after.get():
             open_folder(out_path)
+
+    # ---------------- Word/Excel変換タブ ----------------
+    def convert_tab(self):
+        frame = self.tab_convert
+
+        ttk.Label(
+            frame,
+            text=(
+                "PDFをWord（.docx）/Excel（.xlsx）に変換します。\n"
+                "※ Word変換: pdf2docx が必要です。\n"
+                "※ Excel変換: pdfplumber + pandas + openpyxl が必要です。"
+            ),
+        ).pack(anchor="w", padx=10, pady=10)
+
+        # --- 対象PDF選択（複数対応） ---
+        src_frame = ttk.Frame(frame)
+        src_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        self.convert_files: list[Path] = []
+        self.convert_label = tk.StringVar(value="(未選択)")
+
+        ttk.Button(
+            src_frame,
+            text="PDFを選択",
+            command=self.choose_convert_pdfs,
+        ).pack(side="left")
+
+        ttk.Label(
+            src_frame,
+            textvariable=self.convert_label,
+        ).pack(side="left", padx=10)
+
+        # D&D対応（Word/Excel変換タブ用）
+        if DND_AVAILABLE:
+            frame.drop_target_register(DND_FILES)
+            frame.dnd_bind("<<Drop>>", self.on_drop_convert)
+
+        # --- 変換形式 ---
+        format_frame = ttk.LabelFrame(frame, text="変換形式")
+        format_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        self.convert_word_var = tk.BooleanVar(value=True)
+        self.convert_excel_var = tk.BooleanVar(value=False)
+
+        chk_word = ttk.Checkbutton(
+            format_frame,
+            text="Word (.docx)",
+            variable=self.convert_word_var,
+        )
+        chk_word.pack(anchor="w", padx=10, pady=5)
+        self.action_buttons.append(chk_word)
+
+        chk_excel = ttk.Checkbutton(
+            format_frame,
+            text="Excel (.xlsx)",
+            variable=self.convert_excel_var,
+        )
+        chk_excel.pack(anchor="w", padx=10, pady=(0, 5))
+        self.action_buttons.append(chk_excel)
+
+        ttk.Label(
+            frame,
+            text="※ 表がある場合は抽出して表形式で出力します（可能な範囲）。",
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
+        # --- 実行ボタン ---
+        btn_run_convert = ttk.Button(
+            frame,
+            text="変換を実行",
+            command=self.run_convert,
+        )
+        btn_run_convert.pack(pady=10)
+        self.action_buttons.append(btn_run_convert)
+
+    def choose_convert_pdfs(self):
+        paths = filedialog.askopenfilenames(
+            title="変換するPDFを選択",
+            filetypes=[("PDFファイル", "*.pdf")],
+        )
+        if not paths:
+            return
+
+        self.convert_files = [Path(p) for p in paths]
+
+        if len(self.convert_files) == 1:
+            label = self.convert_files[0].name
+        else:
+            label = f"{self.convert_files[0].name} ほか {len(self.convert_files) - 1}件"
+
+        self.convert_label.set(label)
+        self.status.set(f"変換対象: {len(self.convert_files)} 件のPDFを選択しました。")
+
+        if self.convert_files:
+            self.update_pdf_info(self.convert_files[0])
+
+    def on_drop_convert(self, event):
+        pdf_paths = self._iter_dnd_pdf_paths(event)
+        if not pdf_paths:
+            return
+
+        added = 0
+        for path in pdf_paths:
+            if path not in self.convert_files:
+                self.convert_files.append(path)
+                added += 1
+
+        if not self.convert_files:
+            self.convert_label.set("（未選択）")
+        elif len(self.convert_files) == 1:
+            self.convert_label.set(self.convert_files[0].name)
+        else:
+            self.convert_label.set(
+                f"{self.convert_files[0].name} ほか {len(self.convert_files) - 1}件"
+            )
+
+        self.status.set(f"D&Dで変換対象: {len(self.convert_files)} 件のPDFを選択しました。")
+
+        if self.convert_files:
+            self.update_pdf_info(self.convert_files[0])
+
+    def run_convert(self):
+        if not getattr(self, "convert_files", None):
+            self.convert_files = []
+
+        if not self.convert_files:
+            messagebox.showwarning("警告", "変換するPDFを選んでください。")
+            return
+
+        do_word = self.convert_word_var.get()
+        do_excel = self.convert_excel_var.get()
+        if not do_word and not do_excel:
+            messagebox.showwarning("警告", "WordまたはExcelの変換形式を選んでください。")
+            return
+
+        dir_str = self.output_dir_var.get().strip()
+        out_dir = Path(dir_str) if dir_str else self.convert_files[0].parent
+
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            messagebox.showerror("エラー", f"出力フォルダの作成に失敗しました:\n{e}")
+            return
+
+        tasks_per_file = (1 if do_word else 0) + (1 if do_excel else 0)
+        total_tasks = len(self.convert_files) * tasks_per_file
+        completed = 0
+
+        self.set_actions_state(False)
+        self.progress_reset()
+        self.status.set("変換中...")
+
+        failures: list[str] = []
+
+        for src in self.convert_files:
+            if do_word:
+                out_path = out_dir / f"{src.stem}.docx"
+                if not self.confirm_overwrite(out_path):
+                    failures.append(f"{src.name} (Word: 既存ファイルあり)")
+                else:
+                    try:
+                        self.convert_pdf_to_word(src, out_path)
+                    except Exception as e:
+                        failures.append(f"{src.name} (Word: {e})")
+                completed += 1
+                self.progress_set((completed / total_tasks) * 100)
+
+            if do_excel:
+                out_path = out_dir / f"{src.stem}.xlsx"
+                if not self.confirm_overwrite(out_path):
+                    failures.append(f"{src.name} (Excel: 既存ファイルあり)")
+                else:
+                    try:
+                        self.convert_pdf_to_excel(src, out_path)
+                    except Exception as e:
+                        failures.append(f"{src.name} (Excel: {e})")
+                completed += 1
+                self.progress_set((completed / total_tasks) * 100)
+
+        self.progress_done()
+        self.set_actions_state(True)
+
+        if failures:
+            messagebox.showwarning(
+                "一部失敗",
+                "変換に失敗したファイルがあります:\n" + "\n".join(failures),
+            )
+            self.status.set("一部の変換に失敗しました")
+        else:
+            messagebox.showinfo("変換完了", f"変換が完了しました:\n{out_dir}")
+            self.status.set(f"変換を完了しました: {out_dir}")
+
+        if self.open_after.get():
+            open_folder(out_dir)
+
+    def convert_pdf_to_word(self, src: Path, out_path: Path) -> None:
+        try:
+            from pdf2docx import Converter
+        except Exception as e:
+            raise RuntimeError("pdf2docx が見つかりません") from e
+
+        cv = Converter(str(src))
+        try:
+            cv.convert(str(out_path), start=0, end=None)
+        finally:
+            cv.close()
+
+    def convert_pdf_to_excel(self, src: Path, out_path: Path) -> None:
+        try:
+            import pdfplumber
+            import pandas as pd
+            import openpyxl  # noqa: F401
+        except Exception as e:
+            raise RuntimeError("pdfplumber / pandas / openpyxl が見つかりません") from e
+
+        tables_found = False
+        text_lines: list[str] = []
+
+        with pdfplumber.open(str(src)) as pdf:
+            with pd.ExcelWriter(str(out_path)) as writer:
+                for page_index, page in enumerate(pdf.pages, start=1):
+                    tables = page.extract_tables()
+                    if tables:
+                        tables_found = True
+                        for table_index, table in enumerate(tables, start=1):
+                            df = pd.DataFrame(table)
+                            sheet_name = f"p{page_index}_t{table_index}"
+                            df.to_excel(writer, sheet_name=sheet_name[:31], index=False, header=False)
+                    else:
+                        text = page.extract_text()
+                        if text:
+                            text_lines.append(f"[Page {page_index}]")
+                            text_lines.extend(text.splitlines())
+
+                if not tables_found:
+                    if not text_lines:
+                        text_lines.append("テーブルやテキストを抽出できませんでした。")
+                    df = pd.DataFrame(text_lines, columns=["text"])
+                    df.to_excel(writer, sheet_name="text", index=False)
 
 
     def on_compress_scale_release(self, event=None):
