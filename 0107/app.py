@@ -40,8 +40,6 @@ class PDFToolApp(BaseTk):
         self.geometry("950x900")
         self.resizable(True, True)
 
-        style = ttk.Style(self)
-
         # PDFファイルパスのリスト（結合タブで使用）
         self.pdf_paths: list[Path] = []
 
@@ -66,9 +64,12 @@ class PDFToolApp(BaseTk):
         # 上書き一括設定
         self.overwrite_all = tk.BooleanVar(value=False)
 
+        # 変換タブのファイル名パターン
+        self.convert_name_pattern_var = tk.StringVar(value="")
+
         self.widgets()
 
-        # いったんレイアウトを確定させてから、そのサイズを最小サイズにする
+        # レイアウト確定後、そのサイズを最小サイズにする
         self.update_idletasks()
         self.minsize(self.winfo_width(), self.winfo_height())
 
@@ -77,10 +78,6 @@ class PDFToolApp(BaseTk):
 
     # ===== 共通ヘルパー：プレースホルダ & ファイル名 =====
     def init_placeholder(self, entry: tk.Entry, placeholder_text: str):
-        """
-        Entryに薄いグレーのプレースホルダを設定する。
-        entry._placeholder / entry._has_placeholder を内部フラグとして使う。
-        """
         entry._placeholder = placeholder_text
         entry._has_placeholder = False
 
@@ -97,13 +94,9 @@ class PDFToolApp(BaseTk):
         entry.bind("<FocusIn>", on_focus_in)
         entry.bind("<FocusOut>", on_focus_out)
 
-        # 初期表示
         self.set_placeholder(entry, placeholder_text)
 
     def set_placeholder(self, entry: tk.Entry, placeholder_text: str):
-        """
-        すでにユーザーが入力していなければ、プレースホルダを再設定する。
-        """
         entry._placeholder = placeholder_text
         if getattr(entry, "_has_placeholder", False) or not entry.get():
             entry.delete(0, "end")
@@ -112,9 +105,6 @@ class PDFToolApp(BaseTk):
             entry._has_placeholder = True
 
     def get_entry_text(self, entry: tk.Entry) -> str:
-        """
-        Entryから、プレースホルダを除いた実際の入力文字列を取得する。
-        """
         text = entry.get().strip()
         if getattr(entry, "_has_placeholder", False):
             return ""
@@ -196,16 +186,10 @@ class PDFToolApp(BaseTk):
 
         self.set_placeholder(self.lock_output_entry, placeholder)
 
-    # ===== ファイル名・上書き確認（共通） =====
+    # ===== ファイル名・上書き確認（共通）=====
     def confirm_overwrite(self, path: Path) -> bool:
-        """
-        path が既に存在する場合、上書きして良いかを確認する。
-        self.overwrite_all が True の場合は確認せずに上書き。
-        戻り値: True = 実行続行, False = 中止
-        """
         name = path.name
 
-        # 不正文字チェック
         bad = [c for c in self.INVALID_FILENAME_CHARS if c in name]
         if bad:
             messagebox.showwarning(
@@ -216,15 +200,12 @@ class PDFToolApp(BaseTk):
             )
             return False
 
-        # 存在しなければそのままOK
         if not path.exists():
             return True
 
-        # 「全て上書き」がONなら聞かずにOK
         if self.overwrite_all.get():
             return True
 
-        # 個別確認
         return messagebox.askyesno(
             "確認",
             f"{name} は既に存在します。\n\n"
@@ -263,46 +244,15 @@ class PDFToolApp(BaseTk):
     def widgets(self):
         self.action_buttons = []
 
-        # 中央エリア（メニュー or Notebook を切り替え表示）
-        self.main_area = ttk.Frame(self)
-        self.main_area.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+        # Notebook
+        self.nb = ttk.Notebook(self)
 
-        # ===== メニュー画面 =====
-        self.menu_frame = ttk.Frame(self.main_area)
-        self.menu_frame.pack(fill="both", expand=True)
-
-        ttk.Label(
-            self.menu_frame,
-            text="PDF 便利ツール メニュー",
-            font=("", 14, "bold")
-        ).pack(pady=(20, 10))
-
-        btn_area = ttk.Frame(self.menu_frame)
-        btn_area.pack(expand=True)
-
-        def make_menu_button(text, row, col, cmd):
-            btn = ttk.Button(btn_area, text=text, command=cmd)
-            btn.grid(row=row, column=col, padx=15, pady=15,
-                     ipadx=30, ipady=20, sticky="nsew")
-            btn_area.grid_rowconfigure(row, weight=1)
-            btn_area.grid_columnconfigure(col, weight=1)
-
-        make_menu_button("PDF結合",           0, 0, lambda: self.show_feature("merge"))
-        make_menu_button("ページ抽出／削除",   0, 1, lambda: self.show_feature("split"))
-        make_menu_button("並び替え／回転",     1, 0, lambda: self.show_feature("reorder"))
-        make_menu_button("PDF圧縮",           1, 1, lambda: self.show_feature("compress"))
-        make_menu_button("PDF→Word/Excel変換", 2, 0, lambda: self.show_feature("convert"))
-        make_menu_button("パスワード設定／解除", 2, 1, lambda: self.show_feature("password"))
-
-        # ===== Notebook（メイン機能） ※最初は表示しない =====
-        self.nb = ttk.Notebook(self.main_area)
-
-        # ---- 各タブ作成 ----
+        # 各タブ
         self.tab_merge = ttk.Frame(self.nb)
         self.tab_split = ttk.Frame(self.nb)
         self.tab_reorder = ttk.Frame(self.nb)
         self.tab_compress = ttk.Frame(self.nb)
-        self.tab_convert = ttk.Frame(self.nb)      # 変換タブ
+        self.tab_convert = ttk.Frame(self.nb)
         self.tab_password = ttk.Frame(self.nb)
 
         self.nb.add(self.tab_merge, text="結合")
@@ -312,7 +262,7 @@ class PDFToolApp(BaseTk):
         self.nb.add(self.tab_convert, text="変換（Word/Excel）")
         self.nb.add(self.tab_password, text="パスワード設定／解除")
 
-        # タブ内容
+        # 各タブ中身
         self.merge_tab()
         self.split_tab()
         self.reorder_tab()
@@ -320,37 +270,33 @@ class PDFToolApp(BaseTk):
         self.convert_tab()
         self.password_tab()
 
-        # ------ 共通 出力フォルダ行 ------
-        out_row = ttk.Frame(self)
-        out_row.pack(fill="x", padx=10, pady=(0, 2))
+        # 共通 出力フォルダ行
+        self.out_row = ttk.Frame(self)
 
-        ttk.Label(out_row, text="出力フォルダ（他タブ共通）:").pack(side="left")
+        ttk.Label(self.out_row, text="出力フォルダ（他タブ共通）:").pack(side="left")
 
-        out_entry = ttk.Entry(out_row, textvariable=self.output_dir_var)
+        out_entry = ttk.Entry(self.out_row, textvariable=self.output_dir_var)
         out_entry.pack(side="left", fill="x", expand=True, padx=5)
 
         ttk.Button(
-            out_row,
+            self.out_row,
             text="参照",
             command=self.browse_output_dir,
         ).pack(side="left")
 
         # 説明
-        note_row = ttk.Frame(self)
-        note_row.pack(fill="x", padx=10, pady=(0, 2))
-
+        self.note_row = ttk.Frame(self)
         ttk.Label(
-            note_row,
+            self.note_row,
             text="※ 出力フォルダ未指定の場合、元のPDFと同じフォルダに作成します。"
         ).pack(anchor="w")
 
-        #  処理完了後にフォルダを開くかどうか ＋ 上書き一括設定
-        chk_row = ttk.Frame(self)
-        chk_row.pack(fill="x", padx=10, pady=(0, 2))
+        # 処理完了後にフォルダを開くかどうか ＋ 上書き一括設定
+        self.chk_row = ttk.Frame(self)
 
         self.open_after = tk.BooleanVar(value=False)
         chk_open = ttk.Checkbutton(
-            chk_row,
+            self.chk_row,
             text="処理完了後に出力フォルダを開く",
             variable=self.open_after,
         )
@@ -358,51 +304,48 @@ class PDFToolApp(BaseTk):
         self.action_buttons.append(chk_open)
 
         chk_overwrite = ttk.Checkbutton(
-            chk_row,
+            self.chk_row,
             text="同名ファイルは確認せず全て上書きする",
             variable=self.overwrite_all,
         )
         chk_overwrite.pack(anchor="w", pady=(2, 0))
         self.action_buttons.append(chk_overwrite)
 
-        # --- PDF基本情報パネル ---
-        info_frame = ttk.LabelFrame(self, text="選択中PDFの情報")
-        info_frame.pack(fill="x", padx=10, pady=(5, 5))
+        # PDF基本情報パネル
+        self.info_frame = ttk.LabelFrame(self, text="選択中PDFの情報")
 
-        row1 = ttk.Frame(info_frame)
+        row1 = ttk.Frame(self.info_frame)
         row1.pack(fill="x", padx=5, pady=2)
         ttk.Label(row1, text="ファイル名:").pack(side="left")
         ttk.Label(row1, textvariable=self.info_name).pack(side="left", padx=5)
 
-        row2 = ttk.Frame(info_frame)
+        row2 = ttk.Frame(self.info_frame)
         row2.pack(fill="x", padx=5, pady=2)
         ttk.Label(row2, text="ページ数:").pack(side="left")
         ttk.Label(row2, textvariable=self.info_pages).pack(side="left", padx=5)
 
-        row3 = ttk.Frame(info_frame)
+        row3 = ttk.Frame(self.info_frame)
         row3.pack(fill="x", padx=5, pady=2)
         ttk.Label(row3, text="ファイルサイズ:").pack(side="left")
         ttk.Label(row3, textvariable=self.info_size).pack(side="left", padx=5)
 
-        row4 = ttk.Frame(info_frame)
+        row4 = ttk.Frame(self.info_frame)
         row4.pack(fill="x", padx=5, pady=2)
         ttk.Label(row4, text="場所:").pack(side="left")
         ttk.Label(row4, textvariable=self.info_path, wraplength=700).pack(side="left", padx=5)
 
-        # --- ステータスバーとプログレスバー ---
-        status_frame = ttk.Frame(self)
-        status_frame.pack(fill="x", padx=5, pady=(0, 5))
+        # ステータスバーとプログレスバー
+        self.status_frame = ttk.Frame(self)
 
         ttk.Label(
-            status_frame,
+            self.status_frame,
             textvariable=self.status,
             anchor="w",
         ).pack(side="left", padx=5)
 
-        # プログレスバー
         self.progress_var = tk.DoubleVar(value=0)
         self.progress = ttk.Progressbar(
-            status_frame,
+            self.status_frame,
             variable=self.progress_var,
             maximum=100,
             mode="determinate",
@@ -410,29 +353,80 @@ class PDFToolApp(BaseTk):
         )
         self.progress.pack(side="right", padx=5)
 
-    # ===== メニュー切り替え =====
+        # 起動時はメニュー画面を表示
+        self.show_menu()
+
+    # ===== メニュー画面 =====
     def show_menu(self):
-        """Notebook を隠してメニュー画面を表示"""
-        self.nb.pack_forget()
-        self.menu_frame.pack(fill="both", expand=True)
-        self.status.set("メニュー画面")
+        self.menu_frame = tk.Frame(self, bg="#f0f0f0")
+        self.menu_frame.pack(fill="both", expand=True, padx=20, pady=20)
 
-    def show_feature(self, feature: str):
-        """メニューを隠して該当タブを表示"""
-        self.menu_frame.pack_forget()
-        self.nb.pack(fill="both", expand=True)
+        title = tk.Label(
+            self.menu_frame,
+            text="PDF便利ツール メニュー",
+            font=("Meiryo", 20, "bold"),
+            bg="#f0f0f0"
+        )
+        title.pack(pady=(0, 20))
 
-        if feature == "merge":
+        grid_frame = tk.Frame(self.menu_frame, bg="#f0f0f0")
+        grid_frame.pack(expand=True)
+
+        buttons = [
+            ("PDF結合", "merge", "#4CAF50"),
+            ("ページ抽出／削除", "split", "#2196F3"),
+            ("並び替え／回転", "reorder", "#9C27B0"),
+            ("圧縮", "compress", "#FF9800"),
+            ("変換（Word／Excel）", "convert", "#009688"),
+            ("パスワード設定／解除", "password", "#F44336"),
+        ]
+
+        for idx, (label, key, color) in enumerate(buttons):
+            r = idx // 3
+            c = idx % 3
+            btn = tk.Button(
+                grid_frame,
+                text=label,
+                font=("Meiryo", 14, "bold"),
+                width=16,
+                height=3,
+                bg=color,
+                fg="white",
+                activebackground=color,
+                activeforeground="white",
+                relief="raised",
+                bd=3,
+                command=lambda k=key: self.show_main_ui(k),
+            )
+            btn.grid(row=r, column=c, padx=15, pady=15, sticky="nsew")
+
+        for i in range(3):
+            grid_frame.columnconfigure(i, weight=1)
+        for i in range(2):
+            grid_frame.rowconfigure(i, weight=1)
+
+    def show_main_ui(self, initial_tab: Optional[str] = None):
+        if hasattr(self, "menu_frame") and self.menu_frame.winfo_exists():
+            self.menu_frame.destroy()
+
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(10, 5))
+        self.out_row.pack(fill="x", padx=10, pady=(0, 2))
+        self.note_row.pack(fill="x", padx=10, pady=(0, 2))
+        self.chk_row.pack(fill="x", padx=10, pady=(0, 2))
+        self.info_frame.pack(fill="x", padx=10, pady=(5, 5))
+        self.status_frame.pack(fill="x", padx=5, pady=(0, 5))
+
+        if initial_tab == "merge":
             self.nb.select(self.tab_merge)
-        elif feature == "split":
+        elif initial_tab == "split":
             self.nb.select(self.tab_split)
-        elif feature == "reorder":
+        elif initial_tab == "reorder":
             self.nb.select(self.tab_reorder)
-        elif feature == "compress":
+        elif initial_tab == "compress":
             self.nb.select(self.tab_compress)
-        elif feature == "convert":
+        elif initial_tab == "convert":
             self.nb.select(self.tab_convert)
-        elif feature == "password":
+        elif initial_tab == "password":
             self.nb.select(self.tab_password)
 
     def browse_output_dir(self):
@@ -474,18 +468,6 @@ class PDFToolApp(BaseTk):
     def progress_done(self):
         if hasattr(self, "progress_var"):
             self.progress_var.set(100)
-            self.progress.update_idletasks()
-
-    def progress_start_indeterminate(self):
-        if hasattr(self, "progress"):
-            self.progress.configure(mode="indeterminate", maximum=100)
-            self.progress.start(10)
-
-    def progress_stop_indeterminate(self):
-        if hasattr(self, "progress"):
-            self.progress.stop()
-            self.progress.configure(mode="determinate", maximum=100)
-            self.progress_var.set(0)
             self.progress.update_idletasks()
 
     # ===== D&D 共通ヘルパー =====
@@ -614,11 +596,6 @@ class PDFToolApp(BaseTk):
 
     def merge_tab(self):
         frame = self.tab_merge
-
-        # ← メニューに戻る
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Button(top_bar, text="← メニューに戻る", command=self.show_menu).pack(side="right")
 
         ttk.Label(frame, text="選択中のPDFを、この順番で結合します。").pack(anchor="w", padx=10, pady=10)
         ttk.Label(
@@ -835,11 +812,6 @@ class PDFToolApp(BaseTk):
     # ======================= 抽出／削除タブ =======================
     def split_tab(self):
         frame = self.tab_split
-
-        # ← メニューに戻る
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Button(top_bar, text="← メニューに戻る", command=self.show_menu).pack(side="right")
 
         ttk.Label(
             frame,
@@ -1131,11 +1103,6 @@ class PDFToolApp(BaseTk):
     def reorder_tab(self):
         frame = self.tab_reorder
 
-        # ← メニューに戻る
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Button(top_bar, text="← メニューに戻る", command=self.show_menu).pack(side="right")
-
         ttk.Label(
             frame,
             text=(
@@ -1352,11 +1319,26 @@ class PDFToolApp(BaseTk):
 
         self.update_reorder_output_placeholder()
 
-    # ======================= パスワード関連（ヘルパー） =======================
+    # ======================= パスワード処理（内部ロジック） =======================
     @staticmethod
-    def set_pdf_password(src: Path, out_path: Path, owner_password: str, allow_print: bool) -> None:
+    def set_pdf_password(
+        src: Path,
+        out_path: Path,
+        owner_password: str,
+        forbid_copy: bool,
+        forbid_annotate: bool,
+        forbid_forms: bool,
+        forbid_print: bool,
+        require_open_password: bool,
+    ) -> None:
         """
-        閲覧は自由（パスワード不要）だが、編集・注釈・フォーム入力などを禁止する PDF を出力する。
+        アクセス権限を細かく制御して PDF を出力する。
+
+        forbid_copy      True なら 内容コピー禁止
+        forbid_annotate  True なら 注釈・コメント禁止
+        forbid_forms     True なら フォーム入力禁止
+        forbid_print     True なら 印刷禁止
+        require_open_password True なら 閲覧時にもパスワード必須
         """
         reader = PdfReader(str(src))
         writer = PdfWriter()
@@ -1364,37 +1346,44 @@ class PDFToolApp(BaseTk):
         for page in reader.pages:
             writer.add_page(page)
 
-        # いったん「全許可」からスタート
+        # まず「全部許可」の状態からスタート（全ビット1）
         perms = UserAccessPermissions(-1)
 
-        # 編集・組み立て・注釈などを禁止
-        deny_flags = [
-            "MODIFY",
-            "ASSEMBLE_DOC",
-            "ADD_OR_MODIFY",
-            "FILL_FORM_FIELDS",
-            "EXTRACT_TEXT_AND_GRAPHICS",
-        ]
+        # ---- コピー禁止 ----
+        if forbid_copy:
+            if hasattr(UserAccessPermissions, "EXTRACT"):
+                perms &= ~UserAccessPermissions.EXTRACT
+            if hasattr(UserAccessPermissions, "EXTRACT_TEXT_AND_GRAPHICS"):
+                perms &= ~UserAccessPermissions.EXTRACT_TEXT_AND_GRAPHICS
 
-        for name in deny_flags:
-            flag = getattr(UserAccessPermissions, name, None)
-            if flag is not None:
-                perms &= ~flag
+        # ---- 注釈禁止 ----
+        if forbid_annotate:
+            if hasattr(UserAccessPermissions, "ADD_OR_MODIFY"):
+                perms &= ~UserAccessPermissions.ADD_OR_MODIFY
 
-        # 印刷禁止指定
-        if not allow_print:
-            flag_print = getattr(UserAccessPermissions, "PRINT", None)
-            if flag_print is not None:
-                perms &= ~flag_print
+        # ---- フォーム入力禁止 ----
+        if forbid_forms:
+            if hasattr(UserAccessPermissions, "FILL_FORM_FIELDS"):
+                perms &= ~UserAccessPermissions.FILL_FORM_FIELDS
 
+        # ---- 印刷禁止 ----
+        if forbid_print:
+            if hasattr(UserAccessPermissions, "PRINT"):
+                perms &= ~UserAccessPermissions.PRINT
+            if hasattr(UserAccessPermissions, "PRINT_TO_REPRESENTATION"):
+                perms &= ~UserAccessPermissions.PRINT_TO_REPRESENTATION
+
+        # ---- 閲覧パスワード ----
+        user_pwd = owner_password if require_open_password else ""
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         writer.encrypt(
-            user_password="",
+            user_password=user_pwd,
             owner_password=owner_password,
             permissions_flag=perms,
         )
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(out_path, "wb") as f:
+        with out_path.open("wb") as f:
             writer.write(f)
 
     @staticmethod
@@ -1439,11 +1428,6 @@ class PDFToolApp(BaseTk):
 
     def compress_tab(self):
         frame = self.tab_compress
-
-        # ← メニューに戻る
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Button(top_bar, text="← メニューに戻る", command=self.show_menu).pack(side="right")
 
         targets_frame = ttk.Frame(frame)
         targets_frame.pack(fill="x", padx=10, pady=(10, 10))
@@ -1823,11 +1807,6 @@ class PDFToolApp(BaseTk):
     def convert_tab(self):
         frame = self.tab_convert
 
-        # ← メニューに戻る
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Button(top_bar, text="← メニューに戻る", command=self.show_menu).pack(side="right")
-
         ttk.Label(
             frame,
             text="PDFを Word / Excel に変換します（テキスト＋表）。複数PDFをまとめて変換できます。"
@@ -1886,11 +1865,30 @@ class PDFToolApp(BaseTk):
             variable=self.convert_to_excel,
         ).pack(anchor="w", padx=5, pady=2)
 
+        # 出力ファイル名指定
+        name_frame = ttk.Frame(frame)
+        name_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        ttk.Label(
+            name_frame,
+            text="出力ファイル名（{name} = 元PDF名。拡張子は自動で .docx / .xlsx が付きます）:"
+        ).pack(side="left")
+
+        self.convert_name_pattern_entry = ttk.Entry(
+            name_frame,
+            textvariable=self.convert_name_pattern_var,
+            width=40,
+        )
+        self.convert_name_pattern_entry.pack(side="left", padx=5)
+
+        self.init_placeholder(self.convert_name_pattern_entry, "{name}")
+
         ttk.Label(
             frame,
             text=(
                 "※ 表と認識された部分は、Excel上でセルごとに分割し、すべてのセルに罫線（枠線）を付けて出力します。\n"
                 "※ Excel出力では、文字数に応じて列幅を自動調整し、セル内で折り返して全文が見えるように整えます。\n"
+                "※ 1枚目のシート「テキスト」には、全てのテキストをページ順に出力します。\n"
                 "※ 画像しか含まれていないPDFは、文字や表を正しく抽出できない場合があります。"
             ),
             wraplength=800,
@@ -1913,6 +1911,15 @@ class PDFToolApp(BaseTk):
             self.convert_label.set(
                 f"{self.convert_files[0].name} ほか {len(self.convert_files) - 1}件"
             )
+
+        if hasattr(self, "convert_name_pattern_entry"):
+            if self.convert_files:
+                self.set_placeholder(
+                    self.convert_name_pattern_entry,
+                    f"{self.convert_files[0].stem}"
+                )
+            else:
+                self.set_placeholder(self.convert_name_pattern_entry, "{name}")
 
     def clear_convert_pdfs(self):
         self.convert_files = []
@@ -1954,10 +1961,6 @@ class PDFToolApp(BaseTk):
 
     @staticmethod
     def _convert_pdf_to_word(src: Path, out_path: Path) -> None:
-        """
-        pdfplumber でテキストと表を抽出し、Word に出力。
-        （シンプル実装：ページごとに段落＋表を順に追加）
-        """
         doc = Document()
 
         with pdfplumber.open(str(src)) as pdf:
@@ -1982,7 +1985,7 @@ class PDFToolApp(BaseTk):
                             continue
                         for c_idx, cell_val in enumerate(row):
                             w_table.cell(r_idx, c_idx).text = (cell_val or "").strip()
-                    doc.add_paragraph("")  # 表のあとに空行
+                    doc.add_paragraph("")
 
                 if page_index < len(pdf.pages):
                     doc.add_page_break()
@@ -1992,41 +1995,25 @@ class PDFToolApp(BaseTk):
 
     @staticmethod
     def _convert_pdf_to_excel(src: Path, out_path: Path) -> None:
-        """
-        pdfplumber で PDF からテキストと表を抽出し、Excel に出力する。
-
-        ・1枚目のシート「テキスト」：
-            - 各ページのテキストをそのまま縦に書き出す
-            - 罫線や列幅の自動調整は行わない
-        ・2枚目以降のシート：
-            - 表として認識されたものを 1 表 = 1 シートで出力
-            - すべてのセルに罫線（枠線）を付ける
-            - 文字数に応じて列幅を自動調整し、折り返し表示
-        """
         wb = Workbook()
 
-        # --- 1枚目のシート：全テキスト用 ---
         ws_text = wb.active
         ws_text.title = "テキスト"
 
-        text_row = 1  # テキストを書き込む行位置
+        text_row = 1
 
-        # 罫線スタイル（表シート用）
         thin = Side(style="thin")
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        table_sheet_index = 0  # 何枚目の表か（シート名用）
+        table_sheet_index = 0
 
         with pdfplumber.open(str(src)) as pdf:
             for page_idx, page in enumerate(pdf.pages, start=1):
-                # ---------- テキスト（1枚目のシート） ----------
                 text = page.extract_text() or ""
 
-                # ページ見出し
-                ws_text.cell(row=text_row, column=1,
-                             value="このタブでは読み込んだ文字を全て出力しています。表としての出力は他タブをご確認ください。")
+                ws_text.cell(row=text_row, column=1, value="このシートでは読み込んだ文字を全て出力しています。表としての出力は別シートをご確認ください。")
                 text_row += 1
-                ws_text.cell(row=text_row, column=1, value=f" {page_idx}ページ目")
+                ws_text.cell(row=text_row, column=1, value=f"{page_idx}ページ目")
                 text_row += 1
 
                 if text.strip():
@@ -2034,10 +2021,8 @@ class PDFToolApp(BaseTk):
                         ws_text.cell(row=text_row, column=1, value=line)
                         text_row += 1
 
-                # ページ間を1行空ける
                 text_row += 1
 
-                # ---------- 表（2枚目以降のシート） ----------
                 tables = page.extract_tables()
                 if not tables:
                     continue
@@ -2049,7 +2034,6 @@ class PDFToolApp(BaseTk):
                     table_sheet_index += 1
                     ws_tbl = wb.create_sheet(title=f"表{table_sheet_index}")
 
-                    # 列ごとの最大文字数（このシート内でのみ計算）
                     max_len_per_col: dict[int, int] = {}
 
                     for r_idx, row in enumerate(t, start=1):
@@ -2062,20 +2046,16 @@ class PDFToolApp(BaseTk):
                             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
                             if val:
-                                # 1セル内の最長行の文字数を幅計算に使う
                                 max_line_len = max(len(line) for line in val.splitlines())
                                 prev = max_len_per_col.get(c_idx, 0)
                                 if max_line_len > prev:
                                     max_len_per_col[c_idx] = max_line_len
 
-                    # 列幅を自動調整（この表シートだけ）
                     for col_idx, length in max_len_per_col.items():
                         col_letter = get_column_letter(col_idx)
-                        # ざっくり：1文字あたり 1.2 幅、最低 8、最大 80 に制限
                         width = max(8, min(80, length * 1.2))
                         ws_tbl.column_dimensions[col_letter].width = width
 
-        # 保存
         out_path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(str(out_path))
 
@@ -2097,7 +2077,6 @@ class PDFToolApp(BaseTk):
         dir_str = self.output_dir_var.get().strip()
 
         tasks: list[tuple[Path, Optional[Path], Optional[Path]]] = []
-        # （src, word_path, excel_path）
 
         for src in self.convert_files:
             src = Path(src)
@@ -2107,103 +2086,92 @@ class PDFToolApp(BaseTk):
             else:
                 base_dir = src.parent
 
-            word_path = base_dir / f"{src.stem}.docx" if to_word else None
-            excel_path = base_dir / f"{src.stem}.xlsx" if to_excel else None
+            pattern = self.get_entry_text(self.convert_name_pattern_entry).strip()
+            if pattern:
+                if "{name}" in pattern:
+                    base_name = pattern.replace("{name}", src.stem)
+                else:
+                    base_name = pattern
+            else:
+                base_name = src.stem
 
-            # 上書き確認（一括設定に従う）
+            word_path = base_dir / f"{base_name}.docx" if to_word else None
+            excel_path = base_dir / f"{base_name}.xlsx" if to_excel else None
+
             if word_path and not self.confirm_overwrite(word_path):
                 word_path = None
             if excel_path and not self.confirm_overwrite(excel_path):
                 excel_path = None
 
             if not word_path and not excel_path:
-                # このファイルは全部スキップ
                 continue
 
             tasks.append((src, word_path, excel_path))
 
         if not tasks:
             self.status.set("変換をキャンセルしました（すべてスキップ）")
-            return
+        else:
+            self.progress_reset()
+            self.status.set("PDF → Word/Excel 変換を開始しました...")
+            self.set_actions_state(False)
 
-        self.set_actions_state(False)
-        self.progress_reset()
-        self.status.set("変換を開始しました...")
+            def worker():
+                total = len(tasks)
+                done = 0
 
-        total = len(tasks)
+                for idx, (src, word_path, excel_path) in enumerate(tasks, start=1):
+                    try:
+                        if word_path:
+                            self._convert_pdf_to_word(src, word_path)
+                        if excel_path:
+                            self._convert_pdf_to_excel(src, excel_path)
+                        done += 1
+                    except Exception as e:
+                        def _on_err_one(p=src, err=e):
+                            messagebox.showerror("エラー", f"{p.name} の変換中にエラーが発生しました:\n{err}")
+                        self.after(0, _on_err_one)
 
-        def worker():
-            last_out: Optional[Path] = None
+                    percent = idx / total * 100
 
-            try:
-                for i, (src, w_path, x_path) in enumerate(tasks, start=1):
-                    # Word
-                    if w_path:
-                        try:
-                            self._convert_pdf_to_word(src, w_path)
-                            last_out = w_path
-                        except Exception as e:
-                            msg = f"{src.name} の Word 変換に失敗しました:\n{e}"
-                            self.after(0, lambda m=msg: messagebox.showerror("エラー", m))
-
-                    # Excel（表は罫線付き＆セルサイズ調整）
-                    if x_path:
-                        try:
-                            self._convert_pdf_to_excel(src, x_path)
-                            last_out = x_path
-                        except Exception as e:
-                            msg = f"{src.name} の Excel 変換に失敗しました:\n{e}"
-                            self.after(0, lambda m=msg: messagebox.showerror("エラー", m))
-
-                    percent = i / total * 100
-
-                    def _update(p=percent, name=src.name, idx=i):
+                    def _update(p=percent, name=src.name, i=idx):
                         self.progress_set(p)
-                        self.status.set(f"変換中...（{idx}/{total}）{name}")
+                        self.status.set(f"変換中...（{i}/{total}）{name}")
 
                     self.after(0, _update)
 
-            except Exception as e:
-                def _on_error():
-                    messagebox.showerror("エラー", f"変換中に予期しないエラーが発生しました:\n{e}")
-                    self.status.set("変換に失敗しました")
+                def _on_finish():
+                    self.progress_done()
                     self.set_actions_state(True)
-                    self.progress_reset()
+                    self.status.set(f"変換を完了しました: {done} 件")
+                    if self.open_after.get():
+                        last_out = None
+                        for _src, w, x in reversed(tasks):
+                            last_out = w or x
+                            if last_out:
+                                break
+                        if last_out:
+                            open_folder(last_out)
 
-                self.after(0, _on_error)
-                return
+                    messagebox.showinfo("完了", f"PDF → Word/Excel の変換が完了しました。\n成功: {done} 件 / 合計: {total} 件")
 
-            def _on_success():
-                self.progress_done()
-                messagebox.showinfo("完了", f"変換が完了しました。（{len(tasks)} 件）")
-                self.status.set("変換を完了しました。")
-                self.set_actions_state(True)
+                self.after(0, _on_finish)
 
-                if self.open_after.get() and last_out is not None:
-                    open_folder(last_out)
-
-            self.after(0, _on_success)
-
-        threading.Thread(target=worker, daemon=True).start()
+            threading.Thread(target=worker, daemon=True).start()
 
     # ======================= パスワードタブ =======================
     def password_tab(self):
         frame = self.tab_password
 
-        # ← メニューに戻る
-        top_bar = ttk.Frame(frame)
-        top_bar.pack(fill="x", padx=10, pady=(10, 0))
-        ttk.Button(top_bar, text="← メニューに戻る", command=self.show_menu).pack(side="right")
-
         ttk.Label(
             frame,
             text=(
                 "選択したPDFにパスワードを設定／解除します（新規ファイルとして出力）。\n"
-                "・パスワードを設定：編集するにはパスワードが必要なファイルを出力します\n"
-                "・パスワードを解除：既にパスワード付きのPDFからパスワードを外します"
+                "「させたくないこと」にチェックを入れると、その操作を禁止します。\n"
+                "※ 一部のPDFビューア（ブラウザ等）は、制限を無視する場合があります。"
             )
         ).pack(anchor="w", padx=10, pady=10)
 
+        # --- 対象PDF ---
         src_frame = ttk.Frame(frame)
         src_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -2235,6 +2203,7 @@ class PDFToolApp(BaseTk):
             frame.drop_target_register(DND_FILES)
             frame.dnd_bind("<<Drop>>", self.on_drop_lock)
 
+        # --- モード選択（設定 or 解除） ---
         mode_frame = ttk.LabelFrame(frame, text="処理モード")
         mode_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -2256,6 +2225,7 @@ class PDFToolApp(BaseTk):
             command=self.update_lock_mode_ui,
         ).pack(side="left", padx=5, pady=5)
 
+        # --- パスワード入力 ---
         pwd_frame = ttk.LabelFrame(frame, text="パスワード")
         pwd_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -2276,18 +2246,44 @@ class PDFToolApp(BaseTk):
         )
         self.lock_pwd_confirm_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
-        print_frame = ttk.Frame(frame)
-        print_frame.pack(fill="x", padx=10, pady=(0, 10))
+        # --- させたくないこと（禁止したい操作） ---
+        perm_frame = ttk.LabelFrame(frame, text="させたくないこと（禁止したい操作）")
+        perm_frame.pack(fill="x", padx=10, pady=(0, 10))
 
-        self.disable_print = tk.BooleanVar(value=False)
+        # True = 禁止する
+        self.require_open_password = tk.BooleanVar(value=False)  # 開くときにもパスワード必須にする
+        self.forbid_copy = tk.BooleanVar(value=True)             # 内容コピー禁止（デフォルト禁止）
+        self.forbid_annotate = tk.BooleanVar(value=True)         # 注釈・コメント禁止（デフォルト禁止）
+        self.forbid_forms = tk.BooleanVar(value=True)            # フォーム入力禁止（デフォルト禁止）
+        self.forbid_print = tk.BooleanVar(value=False)           # 印刷禁止（デフォルト OFF）
 
-        self.chk_disable_print = ttk.Checkbutton(
-            print_frame,
-            text="印刷を禁止する（閲覧のみ許可）",
-            variable=self.disable_print,
-        )
-        self.chk_disable_print.pack(anchor="w")
+        ttk.Checkbutton(
+            perm_frame,
+            text="開くときにもパスワードを要求する（閲覧も制限する）",
+            variable=self.require_open_password,
+        ).pack(anchor="w", padx=5, pady=2)
+        ttk.Checkbutton(
+            perm_frame,
+            text="内容（テキスト／画像）をコピーさせない",
+            variable=self.forbid_copy,
+        ).pack(anchor="w", padx=5, pady=2)
+        ttk.Checkbutton(
+            perm_frame,
+            text="注釈・コメントを書かせない",
+            variable=self.forbid_annotate,
+        ).pack(anchor="w", padx=5, pady=2)
+        ttk.Checkbutton(
+            perm_frame,
+            text="フォームに入力させない",
+            variable=self.forbid_forms,
+        ).pack(anchor="w", padx=5, pady=2)
+        ttk.Checkbutton(
+            perm_frame,
+            text="印刷させない",
+            variable=self.forbid_print,
+        ).pack(anchor="w", padx=5, pady=2)
 
+        # --- 出力ファイル名 ---
         out_frame = ttk.Frame(frame)
         out_frame.pack(fill="x", padx=10, pady=(0, 10))
 
@@ -2303,7 +2299,7 @@ class PDFToolApp(BaseTk):
 
         self.init_placeholder(
             self.lock_output_entry,
-            "空欄:'元ファイル名'_ロック済み.pdf / _解除済み.pdf",
+            "空欄:'元ファイル名'_locked.pdf / _unlocked.pdf",
         )
 
         self.update_lock_output_placeholder()
@@ -2318,10 +2314,12 @@ class PDFToolApp(BaseTk):
         mode = self.lock_mode.get()
 
         if mode == "set":
-            self.chk_disable_print.configure(state="normal")
+            # 設定モード：パスワード入力・確認を使用
+            self.lock_pwd_entry.config(state="normal")
             self.lock_pwd_confirm_entry.config(state="normal")
         else:
-            self.chk_disable_print.configure(state="disabled")
+            # 解除モード：確認用は不要
+            self.lock_pwd_entry.config(state="normal")
             self.lock_pwd_confirm_entry.config(state="disabled")
 
         self.lock_pwd_var.set("")
@@ -2386,9 +2384,11 @@ class PDFToolApp(BaseTk):
             return
 
         if mode == "set":
+            # --- 設定モード ---
             if not pwd:
                 messagebox.showwarning("警告", "パスワードを入力してください。")
                 return
+
             if pwd != pwd2:
                 messagebox.showwarning("警告", "確認用パスワードが一致しません。")
                 return
@@ -2407,8 +2407,17 @@ class PDFToolApp(BaseTk):
                 return
 
             try:
-                allow_print = not self.disable_print.get()
-                self.set_pdf_password(src, out_path, pwd, allow_print)
+                self.set_pdf_password(
+                    src,
+                    out_path,
+                    owner_password=pwd,
+                    forbid_copy=self.forbid_copy.get(),
+                    forbid_annotate=self.forbid_annotate.get(),
+                    forbid_forms=self.forbid_forms.get(),
+                    forbid_print=self.forbid_print.get(),
+                    require_open_password=self.require_open_password.get(),
+                )
+
             except Exception as e:
                 messagebox.showerror("エラー", f"パスワード設定に失敗しました:\n{e}")
                 self.status.set("パスワード設定に失敗しました")
@@ -2420,18 +2429,20 @@ class PDFToolApp(BaseTk):
                 open_folder(out_path)
 
         else:
+            # --- 解除モード ---
             if not pwd:
                 messagebox.showwarning("警告", "解除には現在のパスワードが必要です。")
                 return
 
             raw_name = self.get_entry_text(self.lock_output_entry)
             if not raw_name:
-                raw_name = self.get_lock_default_name("remove", src)
+                raw_name = self.get_lock_default_name("clear", src)
 
             if not raw_name.lower().endswith(".pdf"):
                 raw_name += ".pdf"
 
             out_path = out_dir / raw_name
+
             if not self.confirm_overwrite(out_path):
                 self.status.set("パスワード解除をキャンセルしました（既存ファイルあり）")
                 return
@@ -2440,7 +2451,7 @@ class PDFToolApp(BaseTk):
                 self.remove_pdf_password(src, out_path, pwd)
             except ValueError as e:
                 messagebox.showerror("エラー", str(e))
-                self.status.set("パスワード解除に失敗しました（パスワード不一致）")
+                self.status.set("パスワード解除に失敗しました（パスワード不一致または未設定）")
                 return
             except Exception as e:
                 messagebox.showerror("エラー", f"パスワード解除に失敗しました:\n{e}")
@@ -2451,3 +2462,8 @@ class PDFToolApp(BaseTk):
             self.status.set(f"パスワード解除を完了しました: {out_path}")
             if self.open_after.get():
                 open_folder(out_path)
+
+
+if __name__ == "__main__":
+    app = PDFToolApp()
+    app.mainloop()
